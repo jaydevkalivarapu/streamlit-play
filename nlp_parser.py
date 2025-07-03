@@ -158,5 +158,5 @@ if __name__ == '__main__':
     intent_tests = [
         "compare AAPL and GOOG", "trend for MSFT", "price of NVDA", "performance of TSLA", "AAPL vs GOOG"
     ]
-    forit in intent_tests:
+    for it in intent_tests:
         print(f"Text: '{it}' -> Intent: {extract_intent(it)}")
