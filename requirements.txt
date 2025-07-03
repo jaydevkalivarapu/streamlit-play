@@ -1,0 +1,4 @@
+streamlit
+yfinance
+spacy
+# Add other specific versions if needed, e.g., streamlit==1.20.0
