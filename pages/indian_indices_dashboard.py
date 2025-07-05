@@ -7,19 +7,26 @@ import os
 # Ensure the root directory is in sys.path for module imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data_fetcher import get_stock_data
+from nse_scraper import fetch_nse_option_data # Import the new scraper
 
 # Page Configuration
 st.set_page_config(layout="wide", page_title="🇮🇳 Indian Indices Dashboard")
 st.title("🇮🇳 Indian Indices & Options Dashboard")
 
-# Define Indian indices
+# Define Indian indices (for yfinance historical data)
 INDIAN_INDICES = {
     "NIFTY 50": "^NSEI",
     "NIFTY BANK": "^NSEBANK",
-    "SENSEX": "^BSESN",
-    "NIFTY MIDCAP 100": "^CNXMIDCAP", # Nifty Midcap 100
-    "NIFTY SMALLCAP 100": "^CNXSMALLCAP" # Nifty Smallcap 100
-    # Add more indices if needed and available on Yahoo Finance
+    "SENSEX": "^BSESN", # Options for SENSEX might not be available via the same NSE API path
+    "NIFTY MIDCAP 100": "^CNXMIDCAP",
+    "NIFTY SMALLCAP 100": "^CNXSMALLCAP"
+}
+
+# Mapping for NSE scraper symbols (main ones for options)
+NSE_SYMBOL_MAP = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY BANK": "BANKNIFTY",
+    # Other indices like FINNIFTY ("FINNIFTY") could be added if scraper supports
 }
 
 st.subheader("Select an Index")
@@ -30,159 +37,166 @@ selected_index_name = st.selectbox(
 )
 
 if selected_index_name:
-    selected_ticker = INDIAN_INDICES[selected_index_name]
-    st.write(f"You selected: **{selected_index_name}** (Ticker: `{selected_ticker}`)")
+    selected_yf_ticker = INDIAN_INDICES[selected_index_name]
+    st.write(f"Displaying data for: **{selected_index_name}** (yfinance ticker: `{selected_yf_ticker}`)")
 
     st.markdown("---")
-    st.subheader(f"Historical Data for {selected_index_name} (Last 1 Year)")
+    st.subheader(f"Historical Price Data for {selected_index_name} (Last 1 Year)")
 
-    with st.spinner(f"Fetching 1-year data for {selected_index_name}..."):
-        index_data = get_stock_data(selected_ticker, period="1y")
+    with st.spinner(f"Fetching 1-year historical data for {selected_index_name}..."):
+        index_data = get_stock_data(selected_yf_ticker, period="1y")
 
     if not index_data.empty:
-        # Display line chart for 'Close' price
         st.line_chart(index_data['Close'], use_container_width=True)
-
-        # Display summary for the latest day
-        st.subheader("Latest Day's Summary")
+        st.subheader("Latest Day's Summary (from yfinance)")
         latest_day_data = index_data.iloc[-1][['Open', 'High', 'Low', 'Close', 'Volume']]
-        # Transpose for better readability or keep as series
         latest_day_df = pd.DataFrame(latest_day_data).T
-        latest_day_df.index = [index_data.index[-1].strftime('%Y-%m-%d')] # Use date as index
+        latest_day_df.index = [index_data.index[-1].strftime('%Y-%m-%d')]
         st.dataframe(latest_day_df, use_container_width=True)
-
-        # Optional: Show raw data in expander
         with st.expander("View Full Historical Data Table (1 Year)"):
             st.dataframe(index_data, use_container_width=True)
     else:
-        st.error(f"Could not fetch historical data for {selected_index_name} ({selected_ticker}). It might be an invalid ticker or no data is available on Yahoo Finance.")
+        st.error(f"Could not fetch historical price data for {selected_index_name} via yfinance.")
 
-    # Placeholder for options data (future steps)
     st.markdown("---")
-    st.subheader(f"Options Data for {selected_index_name}")
+    st.subheader(f"Options Data for {selected_index_name} (from NSE)")
 
-    try:
-        yf_ticker = yf.Ticker(selected_ticker)
-        expiry_dates = yf_ticker.options
+    if selected_index_name in NSE_SYMBOL_MAP:
+        nse_symbol = NSE_SYMBOL_MAP[selected_index_name]
 
-        if not expiry_dates:
-            st.warning(f"No option expiry dates found for {selected_index_name} ({selected_ticker}) on Yahoo Finance.")
-        else:
-            selected_expiry_date = st.selectbox(
-                "Select Option Expiry Date:",
-                options=expiry_dates,
-                index=0
-            )
-            st.write(f"Selected Expiry: {selected_expiry_date}")
+        # Manage fetching and caching of full NSE option data in session state
+        # Key by nse_symbol to allow data for multiple symbols to exist if user switches
+        nse_data_key_prefix = f'nse_data_{nse_symbol}'
 
-            if selected_expiry_date:
-                with st.spinner(f"Fetching options chain for {selected_index_name} (Expiry: {selected_expiry_date})..."):
-                    try:
-                        options_chain = yf_ticker.option_chain(selected_expiry_date)
-                        # Storing fetched data in session state to avoid re-fetching if only display changes later
-                        st.session_state.options_calls = options_chain.calls
-                        st.session_state.options_puts = options_chain.puts
+        # Button to explicitly refresh NSE data
+        if st.button(f"🔄 Refresh Options Data for {nse_symbol} from NSE"):
+            for key_suffix in ['_spot', '_expiries', '_all_calls', '_all_puts', '_symbol_loaded', '_fetch_error']:
+                st.session_state.pop(f'{nse_data_key_prefix}{key_suffix}', None)
 
-                        st.success(f"Successfully fetched options chain for {selected_expiry_date}.")
+        if not st.session_state.get(f'{nse_data_key_prefix}_symbol_loaded') == nse_symbol or st.session_state.get(f'{nse_data_key_prefix}_fetch_error'):
+            with st.spinner(f"Fetching full options data from NSE for {nse_symbol}..."):
+                spot_price, expiry_dates_list, all_calls_df, all_puts_df = fetch_nse_option_data(nse_symbol)
+                if spot_price is not None and expiry_dates_list: # Basic check for successful fetch
+                    st.session_state[f'{nse_data_key_prefix}_spot'] = spot_price
+                    st.session_state[f'{nse_data_key_prefix}_expiries'] = expiry_dates_list
+                    st.session_state[f'{nse_data_key_prefix}_all_calls'] = all_calls_df
+                    st.session_state[f'{nse_data_key_prefix}_all_puts'] = all_puts_df
+                    st.session_state[f'{nse_data_key_prefix}_symbol_loaded'] = nse_symbol
+                    st.session_state[f'{nse_data_key_prefix}_fetch_error'] = False # Reset error flag
+                    st.success(f"Fetched options data for {nse_symbol} from NSE.")
+                else:
+                    st.error(f"Failed to fetch options data from NSE for {nse_symbol}. Check scraper logs or NSE connectivity.")
+                    st.session_state[f'{nse_data_key_prefix}_fetch_error'] = True
+                    # Ensure keys exist with default empty values to prevent errors downstream
+                    st.session_state.setdefault(f'{nse_data_key_prefix}_spot', None)
+                    st.session_state.setdefault(f'{nse_data_key_prefix}_expiries', [])
+                    st.session_state.setdefault(f'{nse_data_key_prefix}_all_calls', pd.DataFrame())
+                    st.session_state.setdefault(f'{nse_data_key_prefix}_all_puts', pd.DataFrame())
 
-                        # Display Calls and Puts DataFrames using st.tabs
-                        if 'options_calls' in st.session_state and not st.session_state.options_calls.empty and \
-                           'options_puts' in st.session_state and not st.session_state.options_puts.empty:
 
-                            call_df = st.session_state.options_calls
-                            put_df = st.session_state.options_puts
+        # Proceed if data is loaded for the current symbol and no fetch error
+        if st.session_state.get(f'{nse_data_key_prefix}_symbol_loaded') == nse_symbol and not st.session_state.get(f'{nse_data_key_prefix}_fetch_error'):
+            spot_price = st.session_state[f'{nse_data_key_prefix}_spot']
+            expiry_dates = st.session_state[f'{nse_data_key_prefix}_expiries']
+            all_calls_df_for_symbol = st.session_state[f'{nse_data_key_prefix}_all_calls']
+            all_puts_df_for_symbol = st.session_state[f'{nse_data_key_prefix}_all_puts']
 
-                            # Define relevant columns to display, check if they exist
-                            relevant_cols = ['strike', 'lastPrice', 'openInterest', 'volume', 'impliedVolatility', 'bid', 'ask', 'change', 'percentChange', 'lastTradeDate']
+            st.metric(label=f"{nse_symbol} Spot Price (from NSE)", value=f"{spot_price:,.2f}" if spot_price else "N/A")
 
-                            display_call_cols = [col for col in relevant_cols if col in call_df.columns]
-                            display_put_cols = [col for col in relevant_cols if col in put_df.columns]
+            if not expiry_dates:
+                st.warning(f"No option expiry dates found for {selected_index_name} via NSE scraper.")
+            else:
+                selected_expiry_date = st.selectbox(
+                    "Select Option Expiry Date:",
+                    options=expiry_dates,
+                    index=0 # Default to first expiry
+                )
 
-                            tab_call, tab_put = st.tabs(["📞 Calls", "📝 Puts"])
+                if selected_expiry_date:
+                    st.write(f"Data for Expiry: **{selected_expiry_date}**")
 
-                            with tab_call:
-                                st.subheader(f"Call Options for {selected_index_name} (Expiry: {selected_expiry_date})")
-                                if not call_df.empty:
-                                    st.dataframe(call_df[display_call_cols], use_container_width=True)
-                                    with st.expander("View All Call Option Columns"):
-                                        st.dataframe(call_df, use_container_width=True)
-                                else:
-                                    st.info("No call options data to display.")
+                    calls_df_expiry = all_calls_df_for_symbol[all_calls_df_for_symbol['expiryDate'] == selected_expiry_date]
+                    puts_df_expiry = all_puts_df_for_symbol[all_puts_df_for_symbol['expiryDate'] == selected_expiry_date]
 
-                            with tab_put:
-                                st.subheader(f"Put Options for {selected_index_name} (Expiry: {selected_expiry_date})")
-                                if not put_df.empty:
-                                    st.dataframe(put_df[display_put_cols], use_container_width=True)
-                                    with st.expander("View All Put Option Columns"):
-                                        st.dataframe(put_df, use_container_width=True)
-                                else:
-                                    st.info("No put options data to display.")
+                    # Store current selection for potential reuse by plots if needed, though direct passing is fine too
+                    st.session_state.current_nse_calls_expiry_df = calls_df_expiry
+                    st.session_state.current_nse_puts_expiry_df = puts_df_expiry
 
-                            # --- Plot Open Interest by Strike Price ---
-                            st.markdown("---")
-                            st.subheader("Open Interest Analysis")
+                    if not calls_df_expiry.empty or not puts_df_expiry.empty:
+                        tab_call, tab_put = st.tabs(["📞 Calls", "📝 Puts"])
 
-                            # Prepare data for OI plot
-                            # Ensure 'strike' and 'openInterest' columns exist
-                            if 'strike' in call_df.columns and 'openInterest' in call_df.columns and \
-                               'strike' in put_df.columns and 'openInterest' in put_df.columns:
+                        # Common NSE columns: strikePrice, expiryDate, underlying, identifier, openInterest, changeinOpenInterest,
+                        # pChangeinOpenInterest, totalTradedVolume, lastPrice, change, pChange, totalBuyQuantity, totalSellQuantity,
+                        # bidQty, bidprice, askQty, askPrice, underlyingValue
+                        # Prioritizing Open Interest and key price/volume metrics
+                        relevant_cols = ['strikePrice', 'openInterest', 'lastPrice', 'totalTradedVolume', 'change', 'impliedVolatility', 'bidPrice', 'askPrice']
 
-                                # Ensure strike is numeric for proper sorting/merging if needed, handle NaNs in OI
-                                call_oi = call_df[['strike', 'openInterest']].copy()
-                                put_oi = put_df[['strike', 'openInterest']].copy()
-
-                                call_oi['strike'] = pd.to_numeric(call_oi['strike'], errors='coerce')
-                                call_oi['openInterest'] = pd.to_numeric(call_oi['openInterest'], errors='coerce').fillna(0)
-                                put_oi['strike'] = pd.to_numeric(put_oi['strike'], errors='coerce')
-                                put_oi['openInterest'] = pd.to_numeric(put_oi['openInterest'], errors='coerce').fillna(0)
-
-                                # Merge OI data by strike price
-                                oi_by_strike = pd.merge(
-                                    call_oi.rename(columns={'openInterest': 'Call OI'}),
-                                    put_oi.rename(columns={'openInterest': 'Put OI'}),
-                                    on='strike',
-                                    how='outer'
-                                ).fillna(0).sort_values(by='strike').set_index('strike')
-
-                                if not oi_by_strike.empty:
-                                    st.bar_chart(oi_by_strike[['Call OI', 'Put OI']], use_container_width=True)
-
-                                    # Show data table for the OI plot in an expander
-                                    with st.expander("View Open Interest Data Table (by Strike)"):
-                                        st.dataframe(oi_by_strike, use_container_width=True)
-
-                                    # --- Calculate and Display Put-Call Ratio (OI based) ---
-                                    total_call_oi = call_oi['Call OI'].sum() if 'Call OI' in call_oi else 0
-                                    total_put_oi = put_oi['Put OI'].sum() if 'Put OI' in put_oi else 0 # oi_by_strike sums up from individual call_oi/put_oi which might have different strikes
-
-                                    # Re-calculate total OI from the merged table to be sure, or use individual sums before merge
-                                    total_call_oi_merged = oi_by_strike['Call OI'].sum()
-                                    total_put_oi_merged = oi_by_strike['Put OI'].sum()
-
-                                    if total_call_oi_merged > 0: # Avoid division by zero
-                                        pcr_oi = total_put_oi_merged / total_call_oi_merged
-                                        st.metric(label=f"Put-Call Ratio (Open Interest) for {selected_expiry_date}", value=f"{pcr_oi:.2f}")
-                                    else:
-                                        st.metric(label=f"Put-Call Ratio (Open Interest) for {selected_expiry_date}", value="N/A (Call OI is 0)")
-
-                                    st.caption(f"Total Call OI: {total_call_oi_merged:,.0f}, Total Put OI: {total_put_oi_merged:,.0f}")
-
-                                else:
-                                    st.warning("Could not prepare Open Interest data for plotting (e.g., data might be empty after processing). PCR calculation also skipped.")
+                        with tab_call:
+                            st.subheader(f"Call Options")
+                            if not calls_df_expiry.empty:
+                                display_cols = [col for col in relevant_cols if col in calls_df_expiry.columns]
+                                st.dataframe(calls_df_expiry[display_cols], use_container_width=True)
+                                with st.expander("View All Call Option Columns for this Expiry"):
+                                    st.dataframe(calls_df_expiry, use_container_width=True)
                             else:
-                                st.warning("Required columns ('strike', 'openInterest') not found in options data for OI plot. PCR calculation also skipped.")
+                                st.info("No call options data for this expiry.")
+
+                        with tab_put:
+                            st.subheader(f"Put Options")
+                            if not puts_df_expiry.empty:
+                                display_cols = [col for col in relevant_cols if col in puts_df_expiry.columns]
+                                st.dataframe(puts_df_expiry[display_cols], use_container_width=True)
+                                with st.expander("View All Put Option Columns for this Expiry"):
+                                    st.dataframe(puts_df_expiry, use_container_width=True)
+                            else:
+                                st.info("No put options data for this expiry.")
+
+                        # --- Plot Open Interest by Strike Price ---
+                        st.markdown("---")
+                        st.subheader("Open Interest Analysis (NSE Data)")
+
+                        # NSE data uses 'strikePrice' and 'openInterest'
+                        if 'strikePrice' in calls_df_expiry.columns and 'openInterest' in calls_df_expiry.columns and \
+                           'strikePrice' in puts_df_expiry.columns and 'openInterest' in puts_df_expiry.columns:
+
+                            call_oi_data = calls_df_expiry[['strikePrice', 'openInterest']].copy()
+                            put_oi_data = puts_df_expiry[['strikePrice', 'openInterest']].copy()
+
+                            call_oi_data['strikePrice'] = pd.to_numeric(call_oi_data['strikePrice'], errors='coerce')
+                            call_oi_data['openInterest'] = pd.to_numeric(call_oi_data['openInterest'], errors='coerce').fillna(0)
+                            put_oi_data['strikePrice'] = pd.to_numeric(put_oi_data['strikePrice'], errors='coerce')
+                            put_oi_data['openInterest'] = pd.to_numeric(put_oi_data['openInterest'], errors='coerce').fillna(0)
+
+                            # Rename for merge clarity
+                            call_oi_data = call_oi_data.rename(columns={'openInterest': 'Call OI'})
+                            put_oi_data = put_oi_data.rename(columns={'openInterest': 'Put OI'})
+
+                            oi_by_strike = pd.merge(call_oi_data, put_oi_data, on='strikePrice', how='outer').fillna(0)
+                            oi_by_strike = oi_by_strike.sort_values(by='strikePrice').set_index('strikePrice')
+
+                            if not oi_by_strike.empty:
+                                st.bar_chart(oi_by_strike[['Call OI', 'Put OI']], use_container_width=True)
+                                with st.expander("View Open Interest Data Table (by Strike)"):
+                                    st.dataframe(oi_by_strike, use_container_width=True)
+
+                                total_call_oi_merged = oi_by_strike['Call OI'].sum()
+                                total_put_oi_merged = oi_by_strike['Put OI'].sum()
+
+                                if total_call_oi_merged > 0:
+                                    pcr_oi = total_put_oi_merged / total_call_oi_merged
+                                    st.metric(label=f"Put-Call Ratio (OI) for {selected_expiry_date}", value=f"{pcr_oi:.2f}")
+                                else:
+                                    st.metric(label=f"Put-Call Ratio (OI) for {selected_expiry_date}", value="N/A (Call OI is 0)")
+                                st.caption(f"Total Call OI: {total_call_oi_merged:,.0f}, Total Put OI: {total_put_oi_merged:,.0f}")
+                            else:
+                                st.warning("Could not prepare Open Interest data from NSE for plotting.")
                         else:
-                            st.info("Options data was fetched but seems to be empty for Calls or Puts, skipping OI plot and PCR calculation.")
-
-                    except Exception as e_chain:
-                        st.error(f"Failed to fetch options chain for {selected_expiry_date}: {e_chain}")
-                        st.session_state.options_calls = pd.DataFrame() # Ensure empty df if error
-                        st.session_state.options_puts = pd.DataFrame()
-
-    except Exception as e:
-        st.error(f"An error occurred while trying to fetch option expiry dates for {selected_index_name}: {e}")
-        st.info("This index might not have options data available on Yahoo Finance, or there might be a temporary issue.")
-
-
+                            st.warning("Required columns ('strikePrice', 'openInterest') not found in NSE options data for OI plot.")
+                    else:
+                        st.info("No options data available for the selected expiry to display or plot.")
+        else:
+             st.info(f"Options data from NSE for {nse_symbol} is currently unavailable or failed to load. Click 'Refresh' or select a different mapped index.")
+    else:
+        st.info(f"Options data via direct NSE scraping is not configured for '{selected_index_name}'. This feature is primarily for NIFTY and BANKNIFTY.")
 else:
     st.info("Please select an index from the dropdown to view its data.")
