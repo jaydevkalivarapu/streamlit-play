@@ -2,4 +2,6 @@ streamlit
 yfinance
 spacy
 requests
+beautifulsoup4
+lxml
 # Add other specific versions if needed, e.g., streamlit==1.20.0
